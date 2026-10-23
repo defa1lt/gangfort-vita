@@ -1,0 +1,13 @@
+<map width="120" height="80" tilewidth="16" tileheight="16">
+  <objectgroup name="collisions">
+    <object x="16" y="32" width="48" height="16">
+      <polygon points="0,0 48,0 48,16"/>
+    </object>
+  </objectgroup>
+  <objectgroup name="areas">
+    <object name="spawnarea_red" x="8" y="12" width="24" height="20"/>
+  </objectgroup>
+  <properties>
+    <property name="koth_cp_indicator_pos_x" value="42"/>
+  </properties>
+</map>

@@ -1,0 +1,155 @@
+plugins {
+    id 'java'
+}
+
+repositories { mavenCentral() }
+
+if (JavaVersion.current() != JavaVersion.VERSION_17) {
+    throw new GradleException('Gangfort requires JDK 17; set JAVA_HOME to a JDK 17 installation')
+}
+
+def backendRoot = file('third_party/stspsvita')
+def gameJar = file('build/input/gangfort.jar')
+def apk = file(providers.gradleProperty('apk').getOrElse('GANGFORT-v2-1-Pdalife.ru.apk'))
+def dexTools = file(providers.gradleProperty('dexTools').getOrElse('.agents/scratch/dex-tools-v2.4'))
+def generatedC = file('build/generated-c')
+def pendingC = file('build/generated-c.pending')
+
+java { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+
+tasks.register('prepareGame', Exec) {
+    inputs.file(apk)
+    inputs.files(fileTree(dexTools) { include 'lib/*.jar' })
+    inputs.files('tools/prepare_game.py', 'tools/inputs.lock.json')
+    outputs.files(gameJar, file('build/input/manifest.json'), file('build/input/launcher.png'))
+    commandLine 'python3', file('tools/prepare_game.py'), apk, dexTools, gameJar
+}
+
+tasks.named('compileJava') { dependsOn 'prepareGame' }
+
+sourceSets.main.java {
+    srcDirs = ['source/java', "${backendRoot}/backend/src/main/java",
+               "${backendRoot}/backend/stubs/src/main/java",
+               'third_party/gdx-box2d-gwt']
+    exclude 'com/stsvita/backend/NewInstanceRegistry.java'
+    exclude 'com/megacrit/**', 'com/codedisaster/**'
+}
+sourceSets.main.resources.srcDirs = ['source/resources']
+sourceSets.test.java.srcDirs = ['source/test/java', "${backendRoot}/backend/src/test/java"]
+
+dependencies {
+    implementation 'org.teavm:teavm-tooling:0.15.0'
+    implementation 'org.teavm:teavm-classlib:0.15.0'
+    implementation 'org.teavm:teavm-interop:0.15.0'
+    compileOnly files(gameJar)
+    testImplementation files(gameJar)
+}
+
+tasks.register('verifyBackend', JavaExec) {
+    dependsOn testClasses, 'prepareAssets'
+    mainClass = 'GangfortChecks'
+    classpath = sourceSets.test.runtimeClasspath
+    doFirst {
+        def directory = java.nio.file.Files.createTempDirectory(file('build').toPath(), 'checks-').toFile()
+        args = [directory.absolutePath]
+    }
+}
+
+tasks.register('verifyRuntime', JavaExec) {
+    dependsOn testClasses
+    mainClass = 'GangfortCompiler'
+    classpath = sourceSets.test.runtimeClasspath
+    args gameJar.absolutePath, file('build/runtime-checks/generated-c').absolutePath, 'GangfortRuntimeChecks'
+    maxHeapSize = '1g'
+    doLast {
+        exec {
+            commandLine 'python3', file('tools/test_teavm_runtime.py'), file('build/runtime-checks/generated-c')
+        }
+    }
+}
+
+tasks.register('prepareAssets', Sync) {
+    dependsOn 'prepareGame'
+    from(zipTree(apk)) {
+        include 'assets/**'
+        eachFile { path = path.substring('assets/'.length()) }
+        includeEmptyDirs = false
+    }
+    from('assets')
+    into 'build/gangfort-assets'
+    doLast {
+        def atlas = file('build/gangfort-assets/res/textures/ui.atlas')
+        def original = atlas.text
+        def region = /(?m)^gamepad_info\n(?:  [^\n]*\n)+/
+        if (original.findAll(region).size() != 1) {
+            throw new GradleException('Expected one original gamepad instruction region')
+        }
+        atlas.text = original.replaceFirst(region, '') + '''
+vita_controls.png
+size: 188,104
+format: RGBA8888
+filter: Nearest,Nearest
+repeat: none
+gamepad_info
+  rotate: false
+  xy: 0, 0
+  size: 188, 104
+  orig: 188, 104
+  offset: 0, 0
+  index: -1
+'''
+    }
+}
+
+tasks.register('configureVita', Exec) {
+    dependsOn 'transpile', 'prepareAssets'
+    def sdk = providers.gradleProperty('vitaSdk').getOrElse(
+            System.getenv('VITASDK') ?: file('.agents/scratch/vitasdk').absolutePath)
+    commandLine 'python3', file('tools/configure_vita.py'), sdk
+}
+
+tasks.register('vitaEboot', Exec) {
+    dependsOn 'configureVita'
+    commandLine 'cmake', '--build', file('build/gangfort-native'), '--target', 'eboot.bin-self', '--parallel', '4'
+}
+
+tasks.register('vitaVpk', Exec) {
+    dependsOn 'configureVita'
+    commandLine 'cmake', '--build', file('build/gangfort-native'), '--target', 'GangfortVita.vpk-vpk', '--parallel', '4'
+}
+
+tasks.register('transpile', JavaExec) {
+    dependsOn classes
+    mainClass = 'GangfortCompiler'
+    classpath = sourceSets.main.runtimeClasspath
+    args gameJar.absolutePath, pendingC.absolutePath
+    maxHeapSize = '3g'
+    inputs.files(sourceSets.main.output, gameJar, configurations.runtimeClasspath)
+    inputs.files('tools/vita_patch_runtime.py', 'tools/build_fingerprint.py')
+    // CMake verifies the complete generated tree against ready before linking.
+    outputs.files(new File(generatedC, 'ready'), new File(generatedC, 'all.txt'))
+    doFirst {
+        delete new File(generatedC, 'ready')
+        delete pendingC
+        exec {
+            commandLine 'python3', file('tools/build_fingerprint.py'), 'snapshot', generatedC
+        }
+    }
+    doLast {
+        exec {
+            commandLine 'python3', file('tools/vita_patch_runtime.py'), pendingC
+        }
+        def sources = new File(pendingC, 'all.txt')
+        if (!sources.isFile() || sources.readLines().isEmpty()) {
+            throw new GradleException('TeaVM did not produce all.txt')
+        }
+        sources.readLines().each { name ->
+            if (!new File(pendingC, name).isFile()) {
+                throw new GradleException("TeaVM output missing: ${name}")
+            }
+        }
+        exec {
+            commandLine 'python3', file('tools/build_fingerprint.py'), 'publish', generatedC, pendingC
+        }
+    }
+}
