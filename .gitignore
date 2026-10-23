@@ -1,0 +1,33 @@
+# OS & IDE
+.DS_Store
+.vscode/
+.idea/
+.agents/
+.gradle/
+
+# Large Game Archives & Decompiled Trees
+*.apk
+*.zip
+extracted_apk/
+decompiled_gangfort/
+/source/test/testdata/flag_egypt.tmx
+
+# Vita Build Outputs
+/build/
+/build-*/
+/dist/
+*.vpk
+*.self
+*.elf
+*.so
+*.a
+*.o
+*.suprx
+*.log
+runtime_logs/
+debug/
+
+# Local Dev Env
+.vita-dev.env
+__pycache__/
+*.pyc
